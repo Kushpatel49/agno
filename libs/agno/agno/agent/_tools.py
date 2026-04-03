@@ -102,21 +102,42 @@ def _raise_if_async_tools_in_list(tools: list) -> None:
                 )
 
 
+def _invalidate_google_toolkit_creds(agent: Agent) -> None:
+    """Clear cached creds and service on Google toolkits so the decorator re-authenticates."""
+    if not agent.tools or not isinstance(agent.tools, list):
+        return
+    for tool in agent.tools:
+        if isinstance(tool, Toolkit) and hasattr(tool, "google_auth") and hasattr(tool, "creds"):
+            tool.creds = None
+            tool.service = None
+
+
 def _wire_google_auth(agent: Agent, user_id: Optional[str] = None) -> None:
-    """Auto-wire GoogleAuth._db and user_id from agent context."""
+    """Auto-wire GoogleAuth._db and user_id from agent context.
+
+    Only assigns sync BaseDb instances — async DBs are incompatible
+    with GoogleAuth's sync load_token/store_token methods.
+    """
     if not agent.tools or not isinstance(agent.tools, list):
         return
     try:
         from agno.tools.google.auth import GoogleAuth
     except ImportError:
         return
+
+    from agno.db.base import BaseDb
+
     for tool in agent.tools:
         if not isinstance(tool, GoogleAuth):
             continue
-        if tool._db is None and agent.db is not None:
+        # Only wire sync DB — async would return coroutines from sync callers
+        if tool._db is None and agent.db is not None and isinstance(agent.db, BaseDb):
             tool._db = agent.db
-        # Per-request user_id takes precedence for multi-user isolation
-        tool.user_id = user_id or tool.user_id or agent.user_id
+        new_user_id = user_id or tool.user_id or agent.user_id
+        # Invalidate cached creds on all Google toolkits when user changes
+        if tool.user_id and new_user_id != tool.user_id:
+            _invalidate_google_toolkit_creds(agent)
+        tool.user_id = new_user_id
         break
 
 
